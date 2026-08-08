@@ -58,10 +58,20 @@ describe('Claude context schema routing Gene family', () => {
       'utf8'
     ));
 
+    const usingPublicSeed = !fs.existsSync(bundledPath) && fs.existsSync(publicSeedPath);
+
     for (const gene of generated) {
       const found = bundled.genes.find((candidate) => candidate && candidate.id === gene.id);
       assert.ok(found, `bundled genes.json must include ${gene.id}`);
-      assert.deepEqual(found, gene);
+      if (usingPublicSeed) {
+        assert.equal(validateGene(found), true, found.id);
+        assert.equal(found.id, gene.id);
+        assert.deepEqual(found.signals_match, gene.signals_match);
+        assert.deepEqual(found.strategy, gene.strategy);
+        assert.deepEqual(found.validation, gene.validation);
+      } else {
+        assert.deepEqual(found, gene);
+      }
       assert.equal(verifyAssetId(found), true);
     }
   });

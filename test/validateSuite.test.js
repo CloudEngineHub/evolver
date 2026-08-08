@@ -32,9 +32,10 @@ describe('scripts/validate-suite.js (community PR #514)', () => {
   });
 
   it('accepts a single test file path as its argument', () => {
-    // Pick a small existing test file that does not require external services.
-    // proxySettings.test.js is self-contained and fast.
-    const targetTest = path.join('test', 'proxySettings.test.js');
+    // schemaTask.test.js is self-contained and fast in both private-dev and
+    // public builds, unlike proxy/platform tests that intentionally depend on
+    // private-only installer templates.
+    const targetTest = path.join('test', 'schemaTask.test.js');
     assert.ok(fs.existsSync(path.join(REPO_ROOT, targetTest)),
       'probe test file must exist: ' + targetTest);
 

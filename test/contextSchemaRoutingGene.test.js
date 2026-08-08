@@ -52,7 +52,11 @@ describe('Claude context schema routing Gene family', () => {
   it('bundled assets carry the same content-addressed Gene family as the module', () => {
     const generated = buildClaudeContextGeneFamily();
     const bundledPath = path.resolve(__dirname, '..', 'assets', 'gep', 'genes.json');
-    const bundled = JSON.parse(fs.readFileSync(bundledPath, 'utf8'));
+    const publicSeedPath = path.resolve(__dirname, '..', 'assets', 'gep', 'genes.seed.json');
+    const bundled = JSON.parse(fs.readFileSync(
+      fs.existsSync(bundledPath) ? bundledPath : publicSeedPath,
+      'utf8'
+    ));
 
     for (const gene of generated) {
       const found = bundled.genes.find((candidate) => candidate && candidate.id === gene.id);

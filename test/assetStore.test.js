@@ -276,7 +276,95 @@ describe('loadGenes', () => {
     assert.ok(optimize, 'gene_gep_optimize_tool_usage must ship in prod seed');
     assert.deepEqual(optimize.routing_hint, { tier: 'mid', reasoning_level: 'medium' });
 
+    const contextGeneIds = [
+      'gene_claude_prompt_budget_ledger',
+      'gene_claude_context_schema_routing',
+      'gene_claude_tool_schema_lazy_load',
+      'gene_claude_skill_manual_routing',
+      'gene_claude_transcript_handoff_compression',
+      'gene_claude_memory_index_budget',
+    ];
+    for (const id of contextGeneIds) {
+      const contextGene = genes.find(g => g.id === id);
+      assert.ok(contextGene, id + ' must ship in prod seed');
+      assert.deepEqual(contextGene.routing_hint, { tier: 'mid', reasoning_level: 'medium' });
+      assert.ok(verifyAssetId(contextGene), id + ' asset_id must verify');
+    }
+
     assert.ok(fs.existsSync(genesPath()), 'ensureGenesSeeded must have copied seed -> genes.json');
+  });
+
+  it('appends newly bundled upgrade Genes to older bundled-seed stores without overwriting local Genes', () => {
+    const { genesPath, loadGenes } = freshRequire();
+    const localIntegrity = {
+      type: 'Gene',
+      id: 'gene_tool_integrity',
+      category: 'repair',
+      signals_match: ['local-tool-integrity'],
+      strategy: ['user-customized copy must survive upgrade seeding'],
+      summary: 'local customized copy',
+    };
+    fs.writeFileSync(genesPath(), JSON.stringify({
+      version: 1,
+      genes: [
+        { type: 'Gene', id: 'gene_gep_repair_from_errors', strategy: ['old bundled repair'] },
+        { type: 'Gene', id: 'gene_gep_optimize_prompt_and_assets', strategy: ['old bundled optimize'] },
+        localIntegrity,
+      ],
+    }, null, 2) + '\n', 'utf8');
+
+    const genes = loadGenes();
+    const integrity = genes.find(g => g.id === 'gene_tool_integrity');
+    assert.deepEqual(integrity, localIntegrity, 'existing local Gene with same ID must not be overwritten');
+
+    const contextGeneIds = [
+      'gene_claude_prompt_budget_ledger',
+      'gene_claude_context_schema_routing',
+      'gene_claude_tool_schema_lazy_load',
+      'gene_claude_skill_manual_routing',
+      'gene_claude_transcript_handoff_compression',
+      'gene_claude_memory_index_budget',
+    ];
+    const { verifyAssetId } = require('../src/gep/contentHash');
+    for (const id of contextGeneIds) {
+      const contextGene = genes.find(g => g.id === id);
+      assert.ok(contextGene, id + ' must be appended for existing seeded users');
+      assert.ok(verifyAssetId(contextGene), id + ' must keep its valid asset_id');
+    }
+  });
+
+  it('does not take the genes lock after bundled upgrade Genes are already present', () => {
+    const { genesPath, loadGenes } = freshRequire();
+    fs.writeFileSync(genesPath(), JSON.stringify({
+      version: 1,
+      genes: [
+        { type: 'Gene', id: 'gene_gep_repair_from_errors', strategy: ['old bundled repair'] },
+        { type: 'Gene', id: 'gene_gep_optimize_prompt_and_assets', strategy: ['old bundled optimize'] },
+      ],
+    }, null, 2) + '\n', 'utf8');
+
+    loadGenes();
+    const writeFileSync = fs.writeFileSync;
+    let lockWrites = 0;
+    fs.writeFileSync = function patchedWriteFileSync(filePath, ...args) {
+      if (String(filePath).endsWith('genes.json.lock')) lockWrites++;
+      return writeFileSync.call(this, filePath, ...args);
+    };
+    try {
+      loadGenes();
+    } finally {
+      fs.writeFileSync = writeFileSync;
+    }
+    assert.equal(lockWrites, 0, 'steady-state loadGenes must skip the lock when no bundled upgrade Genes are missing');
+  });
+
+  it('does not append bundled upgrade Genes to a hand-authored one-off store', () => {
+    const { genesPath, loadGenes } = freshRequire();
+    const localOnly = { type: 'Gene', id: 'local_only_gene', strategy: ['local only'] };
+    fs.writeFileSync(genesPath(), JSON.stringify({ version: 1, genes: [localOnly] }, null, 2) + '\n', 'utf8');
+
+    const genes = loadGenes();
+    assert.deepEqual(genes, [localOnly]);
   });
 
   it('copies legacy runtime assets from assets/gep into default .evolver/gep store once', () => {

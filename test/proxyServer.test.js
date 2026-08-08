@@ -184,6 +184,20 @@ describe('ProxyHttpServer', () => {
       assert.ok(Array.isArray(res.body.results));
     });
 
+    it('loose asset publish bundles carry sandbox-runnable Capsule validation', () => {
+      const { EvoMapProxy } = require('../src/proxy/index');
+      const proxy = Object.create(EvoMapProxy.prototype);
+      const bundle = proxy._buildBundleFromLooseAsset({
+        type: 'Gene',
+        gene_id: 'gene_proxy_validation_check',
+        content: 'Publish a loose asset through the proxy bundle path with enough content for the Hub quality gates.',
+        strategy: ['Build the loose asset into a Hub-valid Gene bundle', 'Attach validation to both generated assets before publishing'],
+      });
+
+      assert.deepEqual(bundle.gene.validation, ['node --version']);
+      assert.deepEqual(bundle.capsule.validation, bundle.gene.validation);
+    });
+
     it('rejects missing assets and asset_id', async () => {
       const res = await authedReq(`${baseUrl}/asset/submit`, 'POST', {
         priority: 'high',

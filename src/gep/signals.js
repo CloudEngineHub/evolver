@@ -446,6 +446,41 @@ function _extractRegex(corpus, lower, errorHit) {
   }
   if (lower.includes('path.resolve(__dirname, \'../../../')) signals.push('path_outside_workspace');
 
+  if (/claude\s*code/.test(lower) && /(context|上下文|token|prompt|schema|mcp|skill|tool)/.test(lower)) {
+    signals.push('claude_code_context_bloat');
+  }
+  if (/(context|上下文|prompt).{0,80}(bloat|explod|overflow|too large|too long|爆|撑爆|超限|爆了)|爆.{0,40}(context|上下文|token)/i.test(corpus)) {
+    signals.push('context_explosion');
+  }
+  if (/(tool|mcp).{0,60}schema.{0,60}(bloat|large|long|too much|太大|太长|过大)|工具\s*schema.{0,40}(太大|太长|过大)|mcp.{0,40}schema.{0,40}(太大|太长|过大)/i.test(corpus)) {
+    signals.push('tool_schema_bloat');
+  }
+  if (/(skill|available agent types|mcp server instructions).{0,80}(list|description|instructions|too long|bloat|太长|很长|列表)/i.test(corpus) || /skill\s*列表.{0,30}(太长|很长|过大)/i.test(corpus)) {
+    signals.push('skill_list_bloat');
+  }
+  if (/(skill|agent type|mcp server instructions|manual|技能|说明).{0,80}(manual|instructions|description|route card|路由卡|手册|说明).{0,80}(bloat|too long|太长|过大|压缩)/i.test(corpus)) {
+    signals.push('skill_manual_bloat');
+  }
+  if (/(full transcript|pasted transcript|conversation handoff|会话上下文|完整转录|聊天记录).{0,80}(too large|bloat|handoff|爆|撑爆|压缩|交接)/i.test(corpus)) {
+    signals.push('transcript_context_bloat');
+    signals.push('conversation_handoff_bloat');
+  }
+  if (/(memory\.md|memory index|memory recall|memory 索引|记忆索引).{0,80}(budget|bloat|too large|still okay|okay|还好|太大|注入|recall)/i.test(corpus)) {
+    signals.push('memory_index_budget');
+  }
+  if (/(prompt budget|context budget|token budget|预算台账|上下文预算|token预算|measure).{0,80}(ledger|measure|breakdown|台账|测量|拆分)/i.test(corpus)) {
+    signals.push('prompt_budget_measurement');
+  }
+  if (/(lazy[- ]?load|just[- ]?in[- ]?time|按需加载|懒加载).{0,80}(schema|tool|mcp|skill|工具|能力)/i.test(corpus)) {
+    signals.push('lazy_load_schema');
+  }
+  if (/(蒸馏|distill).{0,40}(基因|gene).{0,80}(schema|tool|mcp|skill|上下文|context|工具)/i.test(corpus)) {
+    signals.push('schema_routing_gene_request');
+  }
+  if (/(token|context|上下文).{0,60}(budget|limit|overflow|超限|爆了|撑爆)/i.test(corpus)) {
+    signals.push('token_budget_overflow');
+  }
+
   // Protocol-specific drift signals
   if (lower.includes('prompt') && !lower.includes('evolutionevent')) signals.push('protocol_drift');
 

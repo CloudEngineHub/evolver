@@ -5,6 +5,7 @@ const { computeAssetId, SCHEMA_VERSION } = require('./contentHash');
 const { validateGene } = require('./schemas/gene');
 const { validateCapsule } = require('./schemas/capsule');
 const { validateSyncGene } = require('./syncAsset');
+const { buildClaudeContextGeneFamily } = require('./contextRoutingGene');
 
 // Run validateGene/validateCapsule before persisting. Warn-only -- never throw
 // because losing a write hurts more than persisting a slightly-malformed
@@ -198,6 +199,7 @@ function getDefaultGenes() {
         anti_patterns: ['tool_bypass'],
         routing_hint: { tier: 'cheap', reasoning_level: 'low' },
       },
+      ...buildClaudeContextGeneFamily(),
     ],
   };
 }
@@ -305,22 +307,78 @@ function migrateLegacyRuntimeAssets() {
   }
 }
 
-// First-run seeding: if the user has no local genes.json yet, copy the
-// shipped genes.seed.json into place so they start with the curated
-// starter genes. Once genes.json exists, it is owned by the user and the
-// seed is never re-applied -- this is what keeps `npm i -g @evomap/evolver`
-// upgrades from wiping the user's accumulated asset store. See the
-// 2026-05-03 regression report from Ruan Chengtao.
+const BUNDLED_UPGRADE_GENE_IDS = buildClaudeContextGeneFamily().map(g => g.id);
+const PRIOR_BUNDLED_SEED_MARKER_IDS = [
+  'gene_gep_repair_from_errors',
+  'gene_gep_optimize_prompt_and_assets',
+  'gene_gep_innovate_from_opportunity',
+  'gene_gep_optimize_tool_usage',
+  'gene_tool_integrity',
+  'gene_distilled_s2g-env-vars',
+  'gene_publish_feishu_doc',
+  'gene_conventional_git_commit',
+  'gene_poll_bugbot_review',
+  'gene_gateway_timeout_recovery',
+  'gene_github_webhook_listener',
+];
+
+function shouldAppendBundledUpgradeGenes(existingGenes) {
+  const genes = Array.isArray(existingGenes) ? existingGenes : [];
+  const ids = new Set(genes.map(g => g && g.id).filter(Boolean).map(String));
+  let markerHits = 0;
+  for (const id of PRIOR_BUNDLED_SEED_MARKER_IDS) {
+    if (ids.has(id)) markerHits++;
+  }
+  return markerHits >= 2;
+}
+
+function selectBundledUpgradeGenes(seedGenes, existingIds) {
+  const byId = new Map((Array.isArray(seedGenes) ? seedGenes : [])
+    .filter(g => g && g.id)
+    .map(g => [String(g.id), g]));
+  return BUNDLED_UPGRADE_GENE_IDS
+    .filter(id => !existingIds.has(id))
+    .map(id => byId.get(id))
+    .filter(Boolean);
+}
+
+// Seed the runtime store from bundled Genes without taking ownership away from
+// the user. First run still copies the shipped seed wholesale. Later upgrades
+// append only explicit upgrade Genes into stores that look like an older bundled
+// seed; empty scratch stores and hand-authored one-off test stores stay untouched.
 function ensureGenesSeeded() {
   migrateLegacyRuntimeAssets();
   const target = genesPath();
-  if (fs.existsSync(target)) return;
   const seed = fs.existsSync(genesSeedPath()) ? genesSeedPath() : bundledGenesPath();
   if (!fs.existsSync(seed)) return;
   try {
     ensureDir(path.dirname(target));
-    fs.copyFileSync(seed, target);
-    console.log('[AssetStore] Seeded ' + target + ' from ' + path.basename(seed));
+    if (!fs.existsSync(target)) {
+      fs.copyFileSync(seed, target);
+      console.log('[AssetStore] Seeded ' + target + ' from ' + path.basename(seed));
+      return;
+    }
+
+    const beforeLock = readJsonIfExists(target, { version: 1, genes: [] });
+    const beforeGenes = Array.isArray(beforeLock.genes) ? beforeLock.genes : [];
+    if (!shouldAppendBundledUpgradeGenes(beforeGenes)) return;
+    const seedGenes = readJsonIfExists(seed, { genes: [] }).genes || [];
+    const beforeIds = new Set(beforeGenes.map(g => g && g.id).filter(Boolean).map(String));
+    if (!selectBundledUpgradeGenes(seedGenes, beforeIds).length) return;
+
+    withFileLock(target, () => {
+      const current = readJsonIfExists(target, { version: 1, genes: [] });
+      const existingGenes = Array.isArray(current.genes) ? current.genes : [];
+      if (!shouldAppendBundledUpgradeGenes(existingGenes)) return;
+      const existingIds = new Set(existingGenes.map(g => g && g.id).filter(Boolean).map(String));
+      const missing = selectBundledUpgradeGenes(seedGenes, existingIds);
+      if (!missing.length) return;
+      writeJsonAtomic(target, {
+        version: current.version || 1,
+        genes: existingGenes.concat(missing),
+      });
+      console.log('[AssetStore] Added ' + missing.length + ' bundled upgrade Gene(s) to ' + target);
+    });
   } catch (e) {
     console.warn('[AssetStore] Failed to seed genes.json from seed:', e && e.message || e);
   }

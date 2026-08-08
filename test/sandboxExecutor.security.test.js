@@ -215,3 +215,114 @@ test('createSandboxDir self-heals loose permissions on an owned base', (t) => {
     fs.rmSync(fixtureTmp, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Issues #607/#608/#609: validation commands the Hub issues must actually be
+// runnable in the sandbox, and the two independent gate implementations
+// (validator/sandboxExecutor.js and gep/policyCheck.js) must agree.
+// ---------------------------------------------------------------------------
+
+const policyCheck = require('../src/gep/policyCheck');
+const {
+  SCRIPTLESS_NODE_FLAGS,
+} = require('../src/gep/validator/sandboxExecutor');
+
+test('assertNodeCommandSafe allows info-only node flags without a script file', () => {
+  // runInSandbox() hands each command a FRESH EMPTY directory and provisions no
+  // gene files, so `node --version` is the only shape that can succeed there.
+  // It is also what skillDistiller's prompts tell the LLM to emit. Requiring a
+  // script file here made every Hub-issued validation unrunnable.
+  for (const args of [['--version'], ['-v'], ['--help'], ['-h']]) {
+    assert.doesNotThrow(
+      () => assertNodeCommandSafe({ executable: 'node', args }),
+      'expected node ' + args.join(' ') + ' to be allowed',
+    );
+  }
+});
+
+test('assertNodeCommandSafe still blocks eval/preload/inspector/watch flags', () => {
+  for (const args of [
+    ['-e', '1'], ['--eval', '1'], ['-p', '1'], ['--print', '1'],
+    ['-r', './p.js', 's.js'], ['--require=./p.js', 's.js'],
+    ['--import', './p.js', 's.js'], ['--loader', './l.js', 's.js'],
+    ['--env-file', '.env', 's.js'],
+    ['--inspect', 's.js'], ['--inspect-brk', 's.js'],
+    ['--watch', 's.js'], ['--watch-path', './x', 's.js'],
+    ['--conditions', 'prod', 's.js'], ['-C', 'prod', 's.js'],
+  ]) {
+    assert.throws(
+      () => assertNodeCommandSafe({ executable: 'node', args }),
+      /node flag not allowed/,
+      'expected node ' + args.join(' ') + ' to be blocked',
+    );
+  }
+});
+
+test('assertNodeCommandSafe still requires a script for non-info flags', () => {
+  assert.throws(
+    () => assertNodeCommandSafe({ executable: 'node', args: [] }),
+    /script file argument/,
+  );
+  assert.throws(
+    () => assertNodeCommandSafe({ executable: 'node', args: ['--no-warnings'] }),
+    /script file argument/,
+  );
+});
+
+test('sandbox gate and policyCheck.isValidationCommandAllowed agree', () => {
+  // Drift between these two lists is exactly what shipped genes that passed
+  // publish-side checks and then died in every validator sandbox.
+  const cases = [
+    'node --version', 'node -v', 'node --help', 'node validate.js',
+    'node scripts/check.js --quiet',
+    'node -e "1"', 'node --eval x', 'node -p x', 'node -r ./p.js s.js',
+    'node --require=./p.js s.js', 'node --import ./p.js s.js',
+    'node --loader ./l.js s.js', 'node --env-file .env s.js',
+    'node --inspect s.js', 'node --inspect-brk s.js', 'node --inspect-port=9229 s.js',
+    'node "--inspect" check.js', 'node "--require=./p.js" check.js',
+    'node "-r" "./p.js" check.js', 'node "--watch" check.js',
+    'node --watch s.js', 'node --watch-path ./x s.js',
+    'node --conditions prod s.js', 'node -C prod s.js',
+    'node --no-warnings', 'node --test',
+  ];
+  for (const cmd of cases) {
+    let sandboxOk = true;
+    try {
+      assertNodeCommandSafe(parseCommand(cmd));
+    } catch (_) {
+      sandboxOk = false;
+    }
+    const policyOk = policyCheck.isValidationCommandAllowed(cmd);
+    assert.strictEqual(
+      sandboxOk, policyOk,
+      'gate disagreement for ' + JSON.stringify(cmd) +
+      ': sandbox=' + sandboxOk + ' policyCheck=' + policyOk,
+    );
+  }
+});
+
+test('BLOCKED_NODE_FLAGS and SCRIPTLESS_NODE_FLAGS are identical in both modules', () => {
+  assert.deepStrictEqual(
+    [...BLOCKED_NODE_FLAGS].sort(),
+    [...policyCheck.BLOCKED_NODE_FLAGS].sort(),
+  );
+  assert.deepStrictEqual(
+    [...SCRIPTLESS_NODE_FLAGS].sort(),
+    [...policyCheck.SCRIPTLESS_NODE_FLAGS].sort(),
+  );
+  // A flag can never be both blocked and script-exempt.
+  for (const f of SCRIPTLESS_NODE_FLAGS) {
+    assert.ok(!BLOCKED_NODE_FLAGS.has(f), f + ' must not be in both sets');
+  }
+});
+
+test('a scriptless info command actually runs in a real sandbox', async () => {
+  // End-to-end against the real binary: proves the gate change restores a
+  // validation path that genuinely exits 0 in the empty sandbox workdir,
+  // not just one that passes the static checks.
+  const { runInSandbox } = require('../src/gep/validator/sandboxExecutor');
+  const r = await runInSandbox(['node --version'], {});
+  assert.strictEqual(r.overallOk, true, 'stderr: ' + (r.results[0] && r.results[0].stderr));
+  assert.strictEqual(r.results[0].exitCode, 0);
+  assert.match(r.results[0].stdout, /^v\d+\./);
+});

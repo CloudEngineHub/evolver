@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/EvoMap/evolver/stargazers"><img src="https://img.shields.io/badge/Stars-8.9k-2b3137?logo=github&amp;logoColor=white" alt="GitHub stars"/></a>
+  <a href="https://github.com/EvoMap/evolver/stargazers"><img src="https://img.shields.io/badge/Stars-9k-2b3137?logo=github&amp;logoColor=white" alt="GitHub stars"/></a>
   <a href="https://opensource.org/licenses/GPL-3.0"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"/></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D%2018-green.svg" alt="Node.js &gt;= 18"/></a>
   <a href="https://www.npmjs.com/package/@evomap/evolver"><img src="https://img.shields.io/npm/dm/@evomap/evolver.svg" alt="npm downloads"/></a>

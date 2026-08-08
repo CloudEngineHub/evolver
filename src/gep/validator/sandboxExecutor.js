@@ -58,7 +58,33 @@ const BLOCKED_NODE_FLAGS = new Set([
   '--experimental-loader',
   '--import',
   '--env-file',
+  // Inspector: opens an UNAUTHENTICATED Node debug port (a remote-code-
+  // execution channel) for the command's lifetime. A light `node <script>`
+  // validation never needs it. (`=value` forms are covered by the split('=')
+  // in assertNodeCommandSafe below.) Parity with v2 verify/validation.ts.
+  '--inspect', '--inspect-brk', '--inspect-port', '--inspect-publish-uid',
+  // Watch: keeps the process alive past its work, so validation hangs until
+  // the sandbox SIGKILLs it at the timeout (self-inflicted DoS / slot burn).
+  '--watch', '--watch-path', '--watch-preserve-output',
+  // Module-resolution override: can redirect imports/requires to attacker-
+  // chosen code paths.
+  '--conditions', '-C',
 ]);
+
+// Flags that make `node` print information and exit without executing any
+// user-supplied code. These are the ONLY node invocations allowed to omit a
+// script-file argument.
+//
+// Issues #607/#608/#609: the script-file requirement below was rejecting
+// `node --version` -- which is both the light validation command our own
+// distiller prompts recommend AND the only thing that can possibly succeed
+// here, because runInSandbox() hands every command a FRESH EMPTY directory
+// and provisions no gene files. Requiring a script file in a directory that
+// never contains one made every Hub-issued validation unrunnable: script
+// commands died with MODULE_NOT_FOUND and flag commands were refused before
+// spawn. Info-only flags execute nothing, so exempting them restores a
+// workable validation path without weakening the anti-eval posture above.
+const SCRIPTLESS_NODE_FLAGS = new Set(['--version', '-v', '--help', '-h']);
 
 function assertNodeCommandSafe(parsed) {
   if (parsed.executable !== 'node') return;
@@ -69,7 +95,7 @@ function assertNodeCommandSafe(parsed) {
     }
   }
   const firstPositional = parsed.args.find((a) => !a.startsWith('-'));
-  if (!firstPositional) {
+  if (!firstPositional && !parsed.args.some((a) => SCRIPTLESS_NODE_FLAGS.has(a.split('=')[0]))) {
     throw new Error('node requires a script file argument in sandbox (inline eval is not allowed)');
   }
 }
@@ -473,6 +499,7 @@ module.exports = {
   assertNodeCommandSafe,
   ALLOWED_EXECUTABLES,
   BLOCKED_NODE_FLAGS,
+  SCRIPTLESS_NODE_FLAGS,
   DEFAULT_CMD_TIMEOUT_MS,
   MAX_CMD_TIMEOUT_MS,
   DEFAULT_BATCH_TIMEOUT_MS,

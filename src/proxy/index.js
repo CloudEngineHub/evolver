@@ -227,6 +227,51 @@ function parseRetryAfterMs(res, bodyText) {
   return 0;
 }
 
+// Default validation for an MCP-published gene.
+//
+// `node --version` is sandbox-runnable (info-only flags need no script file,
+// and the validator's runInSandbox hands each command a fresh EMPTY workdir
+// that contains no gene files) and is the light command skillDistiller's own
+// prompts tell the model to emit.
+const DEFAULT_LOOSE_ASSET_VALIDATION = 'node --version';
+
+// Resolve the `validation` array for an MCP-published gene.
+//
+// Issues #607/#608/#609: the default used to be an inline
+// `node -e "if (![1].length) process.exit(1)"`. GHSA-jxh8-jh77-xh6g hardened
+// the validator sandbox to refuse inline eval before spawn, so every gene
+// published through this path shipped a command NO validator could execute:
+// validators burned a task slot, reported `sandbox_block_node_flag`, and the
+// asset never reached consensus. Caller-supplied commands the sandbox would
+// refuse are now rejected at publish time with a clean 400 rather than
+// producing a gene that is dead on arrival.
+//
+// Module-level rather than a method: _buildBundleFromLooseAsset is invoked
+// unbound (`EvoMapProxy.prototype._buildBundleFromLooseAsset.call({}, raw)`)
+// by tests and tooling, so it must not depend on instance state.
+function _resolveLooseAssetValidation(supplied) {
+  const { isValidationCommandAllowed } = require('../gep/policyCheck');
+  const cmds = (Array.isArray(supplied) ? supplied : [])
+    .map((c) => String(c || '').trim())
+    .filter(Boolean);
+  if (cmds.length === 0) return [DEFAULT_LOOSE_ASSET_VALIDATION];
+  const rejected = cmds.filter((c) => !isValidationCommandAllowed(c));
+  if (rejected.length) {
+    throw Object.assign(
+      new Error(
+        'publish: validation command(s) the validator sandbox cannot run: ' +
+        JSON.stringify(rejected) +
+        '. Use `node <script.js>` (a script file the validation ships) or an ' +
+        'info-only command like `node --version`; inline `node -e`/`--eval`, ' +
+        'preload/loader/inspector/watch flags and shell operators are refused ' +
+        'before spawn (GHSA-jxh8-jh77-xh6g).',
+      ),
+      { statusCode: 400 },
+    );
+  }
+  return cmds;
+}
+
 class EvoMapProxy {
   constructor(opts = {}) {
     // evolver#567: default to the canonical Hub URL (config.resolveHubUrl →
@@ -929,10 +974,21 @@ class EvoMapProxy {
 
   // Build a Hub-valid Gene+Capsule bundle from a loose MCP asset
   // ({type, content, summary, signals}). The Hub quality-gates genes (strategy
-  // >=2 steps >=15 chars; sandboxable `node -e` validation) and requires a
-  // companion capsule carrying substantive content; fill the structural
-  // defaults and map the caller's content into strategy/content. Caller-
-  // supplied strategy/validation/category/outcome win when present.
+  // >=2 steps >=15 chars; validation that the validator sandbox can actually
+  // run) and requires a companion capsule carrying substantive content; fill
+  // the structural defaults and map the caller's content into
+  // strategy/content. Caller-supplied strategy/validation/category/outcome win
+  // when present.
+  //
+  // Issues #607/#608/#609: the default used to be
+  // `node -e "if (![1].length) process.exit(1)"`. GHSA-jxh8-jh77-xh6g hardened
+  // the validator sandbox to allow only `node <script-file>` -- inline `-e`
+  // eval is refused before spawn. So every gene published through this path
+  // shipped a validation command that NO validator could ever execute:
+  // validators burned a task slot, reported `sandbox_block_node_flag`, and the
+  // asset could never reach consensus. Emit a sandbox-runnable command
+  // instead, and reject caller-supplied commands the sandbox would refuse
+  // rather than publishing a gene that is dead on arrival.
   _buildBundleFromLooseAsset(raw) {
     const crypto = require('crypto');
     const { SCHEMA_VERSION } = require('../gep/contentHash');
@@ -961,6 +1017,7 @@ class EvoMapProxy {
       }
     }
     const VALID_CATEGORIES = ['repair', 'optimize', 'innovate', 'explore'];
+    const validation = _resolveLooseAssetValidation(r.validation);
     const schemaVersion = r.schema_version || SCHEMA_VERSION;
     const gid = r.gene_id || ('mcp_g_' + crypto.randomBytes(6).toString('hex'));
     const summary = r.summary || text.slice(0, 120) || 'manually published asset';
@@ -976,7 +1033,7 @@ class EvoMapProxy {
       signals_match: signals,
       strategy,
       constraints: (r.constraints && typeof r.constraints === 'object') ? r.constraints : { max_files: 50, forbidden_paths: [] },
-      validation: (Array.isArray(r.validation) && r.validation.length) ? r.validation : ['node -e "if (![1].length) process.exit(1)"'],
+      validation,
     };
     const capsule = {
       type: 'Capsule', schema_version: schemaVersion, id: 'mcp_c_' + crypto.randomBytes(6).toString('hex'),
@@ -986,6 +1043,7 @@ class EvoMapProxy {
       env_fingerprint: { platform: process.platform, arch: process.arch },
       outcome: (r.outcome && typeof r.outcome === 'object' && r.outcome.status) ? r.outcome : { status: 'success', score: 0.5 },
       content: capsuleContent,
+      validation,
     };
     // Redact PII/secrets before publish (Bugbot #256 High). Without client-side
     // sanitize, the Hub's server-side redaction rewrites the body and recomputes

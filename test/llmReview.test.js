@@ -153,6 +153,25 @@ describe('llmReview fail-closed boundary', function () {
     assert.deepEqual(after.filter(name => !before.has(name)), []);
   });
 
+  it('does not leak a temp directory when prompt write fails', function () {
+    const before = new Set(fs.readdirSync(os.tmpdir()).filter(name => name.startsWith('evolver-review-')));
+    const originalWrite = fs.writeFileSync;
+    fs.writeFileSync = function (file) {
+      if (String(file).includes('evolver-review-') && String(file).endsWith('prompt.txt')) {
+        throw new Error('ENOSPC: no space left on device');
+      }
+      return originalWrite.apply(this, arguments);
+    };
+    try {
+      const result = runLlmReview(input, { maxAttempts: 1, timeoutMs: 5000 });
+      assertUnavailable(result, 'runner_error', 1);
+    } finally {
+      fs.writeFileSync = originalWrite;
+    }
+    const after = fs.readdirSync(os.tmpdir()).filter(name => name.startsWith('evolver-review-'));
+    assert.deepEqual(after.filter(name => !before.has(name)), []);
+  });
+
   it('returns null when review is disabled', function () {
     process.env.EVOLVER_LLM_REVIEW = 'false';
     assert.equal(runLlmReview(input, { execute: () => { throw new Error('must not run'); } }), null);

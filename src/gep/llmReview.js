@@ -114,11 +114,11 @@ function classifyExecutionError(error) {
 
 function defaultExecute({ prompt, timeoutMs }) {
   const repoRoot = getRepoRoot();
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evolver-review-'));
-  const tmpFile = path.join(tmpDir, 'prompt.txt');
-  fs.writeFileSync(tmpFile, prompt, 'utf8');
-
+  let tmpDir;
   try {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evolver-review-'));
+    const tmpFile = path.join(tmpDir, 'prompt.txt');
+    fs.writeFileSync(tmpFile, prompt, 'utf8');
     const reviewScript = `
       const fs = require('fs');
       const prompt = fs.readFileSync(process.argv[1], 'utf8');
@@ -132,7 +132,9 @@ function defaultExecute({ prompt, timeoutMs }) {
       windowsHide: true,
     });
   } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    if (tmpDir) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    }
   }
 }
 

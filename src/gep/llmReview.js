@@ -8,6 +8,7 @@ const { getRepoRoot } = require('./paths');
 
 const REVIEW_ENABLED_KEY = 'EVOLVER_LLM_REVIEW';
 const REVIEW_TIMEOUT_MS = 30000;
+const REVIEW_MAX_ATTEMPTS = 2;
 
 function isLlmReviewEnabled() {
   return String(process.env[REVIEW_ENABLED_KEY] || '').toLowerCase() === 'true';
@@ -48,45 +49,130 @@ Respond with a JSON object:
 }`;
 }
 
-function runLlmReview({ diff, gene, signals, mutation }) {
-  if (!isLlmReviewEnabled()) return null;
+function failureResult(reason, summary, trace) {
+  return {
+    approved: false,
+    confidence: 0,
+    concerns: [summary],
+    summary,
+    status: 'unavailable',
+    reason,
+    retryable: true,
+    attempts: trace.length,
+    trace,
+  };
+}
 
-  const prompt = buildReviewPrompt({ diff, gene, signals, mutation });
+function parseReviewResponse(output) {
+  const text = typeof output === 'string' ? output.trim() : '';
+  if (!text) {
+    return { ok: false, reason: 'empty_output', summary: 'review returned empty output' };
+  }
 
+  let parsed;
   try {
-    const repoRoot = getRepoRoot();
+    parsed = JSON.parse(text);
+  } catch (_) {
+    const partial = /^[{[]/.test(text) && !/[}\]]\s*$/.test(text);
+    return {
+      ok: false,
+      reason: partial ? 'partial_response' : 'malformed_output',
+      summary: partial ? 'review returned a partial response' : 'review returned malformed output',
+    };
+  }
 
-    // Write prompt to a temp file to avoid shell quoting issues entirely.
-    const tmpFile = path.join(os.tmpdir(), 'evolver_review_prompt_' + process.pid + '.txt');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+      typeof parsed.approved !== 'boolean' ||
+      !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1 ||
+      !Array.isArray(parsed.concerns) || !parsed.concerns.every(item => typeof item === 'string') ||
+      typeof parsed.summary !== 'string' || !parsed.summary.trim()) {
+    return { ok: false, reason: 'partial_response', summary: 'review response was incomplete' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      approved: parsed.approved,
+      confidence: parsed.confidence,
+      concerns: parsed.concerns,
+      summary: parsed.summary.trim(),
+      status: parsed.approved ? 'approved' : 'rejected',
+      reason: parsed.approved ? 'review_approved' : 'review_rejected',
+      retryable: false,
+    },
+  };
+}
+
+function classifyExecutionError(error) {
+  const message = error && error.message ? String(error.message) : String(error);
+  const timedOut = Boolean(error && (error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM')) || /timed?\s*out|ETIMEDOUT/i.test(message);
+  return {
+    reason: timedOut ? 'timeout' : 'runner_error',
+    summary: timedOut ? 'review timed out' : 'review execution failed',
+  };
+}
+
+function defaultExecute({ prompt, timeoutMs }) {
+  const repoRoot = getRepoRoot();
+  let tmpDir;
+  try {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evolver-review-'));
+    const tmpFile = path.join(tmpDir, 'prompt.txt');
     fs.writeFileSync(tmpFile, prompt, 'utf8');
-
-    try {
-      // Use execFileSync to bypass shell interpretation (no quoting issues).
-      const reviewScript = `
-        const fs = require('fs');
-        const prompt = fs.readFileSync(process.argv[1], 'utf8');
-        console.log(JSON.stringify({ approved: true, confidence: 0.7, concerns: [], summary: 'auto-approved (no external LLM configured)' }));
-      `;
-      const result = execFileSync(process.execPath, ['-e', reviewScript, tmpFile], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        timeout: REVIEW_TIMEOUT_MS,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-
-      try {
-        return JSON.parse(result.trim());
-      } catch (_) {
-        return { approved: true, confidence: 0.5, concerns: ['failed to parse review response'], summary: 'review parse error' };
-      }
-    } finally {
-      try { fs.unlinkSync(tmpFile); } catch (_) {}
+    const reviewScript = `
+      const fs = require('fs');
+      const prompt = fs.readFileSync(process.argv[1], 'utf8');
+      console.log(JSON.stringify({ approved: true, confidence: 0.7, concerns: [], summary: 'auto-approved (no external LLM configured)' }));
+    `;
+    return execFileSync(process.execPath, ['-e', reviewScript, tmpFile], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  } finally {
+    if (tmpDir) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
     }
-  } catch (e) {
-    console.log('[LLMReview] Execution failed (non-fatal): ' + (e && e.message ? e.message : e));
-    return { approved: true, confidence: 0.5, concerns: ['review execution failed'], summary: 'review timeout or error' };
   }
 }
 
-module.exports = { isLlmReviewEnabled, runLlmReview, buildReviewPrompt };
+function runLlmReview({ diff, gene, signals, mutation }, options) {
+  if (!isLlmReviewEnabled()) return null;
+
+  const opts = options || {};
+  const execute = typeof opts.execute === 'function' ? opts.execute : defaultExecute;
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : REVIEW_TIMEOUT_MS;
+  const maxAttempts = Number.isInteger(opts.maxAttempts) && opts.maxAttempts > 0 ? opts.maxAttempts : REVIEW_MAX_ATTEMPTS;
+  const prompt = buildReviewPrompt({ diff, gene, signals, mutation });
+  const trace = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let failure;
+    try {
+      const parsed = parseReviewResponse(execute({ prompt, timeoutMs, attempt }));
+      if (parsed.ok) {
+        trace.push({ attempt, status: parsed.value.status, reason: parsed.value.reason });
+        return Object.assign({}, parsed.value, { attempts: attempt, trace });
+      }
+      failure = parsed;
+    } catch (error) {
+      failure = classifyExecutionError(error);
+    }
+
+    trace.push({ attempt, status: 'unavailable', reason: failure.reason });
+    if (attempt === maxAttempts) {
+      console.log('[LLMReview] Unavailable: ' + failure.reason + ' after ' + attempt + ' attempt(s)');
+      return failureResult(failure.reason, failure.summary, trace);
+    }
+  }
+}
+
+module.exports = {
+  isLlmReviewEnabled,
+  runLlmReview,
+  buildReviewPrompt,
+  parseReviewResponse,
+  classifyExecutionError,
+};
